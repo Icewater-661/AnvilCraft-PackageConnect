@@ -1,0 +1,9 @@
+.gradle/
+build/
+libs/
+run-server/
+run-client/
+.idea/
+.vscode/
+*.log
+*.tmp

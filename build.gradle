@@ -1,0 +1,28 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.139'
+}
+group = 'dev.packageconnect'
+version = '0.1.2'
+base { archivesName = 'anvilcraft-packageconnect-1.21.1' }
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+neoForge {
+    version = '21.1.251'
+    mods { anvilcraft_packageconnect { sourceSet sourceSets.main } }
+    runs {
+        server {
+            server()
+            gameDirectory = file('run-server')
+            programArgument '--nogui'
+            jvmArgument '-Dpackageconnect.selftest=true'
+        }
+    }
+}
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.named('processResources', ProcessResources).configure {
+    inputs.property 'jarVersion', project.version
+    filesMatching('META-INF/neoforge.mods.toml') { expand jarVersion: project.version }
+}

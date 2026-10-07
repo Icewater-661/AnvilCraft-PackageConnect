@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.packageconnect.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["StorageMixin", "PackagerMixin", "PackagerBlockMixin"],
+  "injectors": {"defaultRequire": 1}
+}
