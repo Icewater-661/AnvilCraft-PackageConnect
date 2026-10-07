@@ -83,7 +83,7 @@ On other operating systems, prepare the same local `libs` contents and run `./gr
 
 `./gradlew runServer` starts an isolated development server in `run-server/`, executes functional checks, and shuts down. Configure the Minecraft EULA and server properties in that directory before the first run.
 
-The current version passed 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This was a functional check, not a performance benchmark. See [VALIDATION.md](VALIDATION.md) for the recorded scope and limitations.
+The current version passed 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This was a functional check, not a performance benchmark. 
 
 ## AI-assisted code
 

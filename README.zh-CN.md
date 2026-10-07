@@ -41,7 +41,7 @@
 
 其他系统可自行准备相同 `libs` 内容，再执行 `./gradlew build`。第三方依赖不随源码仓库分发，也不打包进本附属。
 
-`./gradlew.bat runServer` 在独立 `run-server` 目录执行功能检查后关闭。首次运行前需在该目录配置 Minecraft EULA 和服务端配置。当前版本通过 111 项功能断言；这不是压力测试，详细记录见 [VALIDATION.md](VALIDATION.md)。
+`./gradlew.bat runServer` 在独立 `run-server` 目录执行功能检查后关闭。首次运行前需在该目录配置 Minecraft EULA 和服务端配置。当前版本通过 111 项功能断言。
 
 ## AI 辅助代码说明
 
