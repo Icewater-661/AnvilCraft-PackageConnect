@@ -1,15 +1,21 @@
 plugins {
     id 'java-library'
+    id 'checkstyle'
+    id 'com.diffplug.spotless' version '8.1.0'
     id 'net.neoforged.moddev' version '2.0.139'
 }
 group = 'dev.packageconnect'
 version = '0.1.2'
-base { archivesName = 'anvilcraft-packageconnect-1.21.1' }
+base { archivesName = "anvilcraft-packageconnect-${minecraft_version}" }
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
 neoForge {
-    version = '21.1.251'
+    version = neoforge_version
     mods { anvilcraft_packageconnect { sourceSet sourceSets.main } }
     runs {
+        client {
+            client()
+            gameDirectory = file('run-client')
+        }
         server {
             server()
             gameDirectory = file('run-server')
@@ -18,11 +24,94 @@ neoForge {
         }
     }
 }
-dependencies {
-    implementation fileTree(dir: 'libs', include: ['*.jar'])
+// ModDev 注册项目级仓库，因此在同一层声明依赖仓库以避免 settings 仓库被忽略。
+// ModDev adds project repositories, so declare dependency repositories at the same level.
+repositories {
+    mavenCentral()
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Modrinth'
+                url = 'https://api.modrinth.com/maven'
+            }
+        }
+        filter { includeGroup 'maven.modrinth' }
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Create'
+                url = 'https://maven.createmod.net'
+            }
+        }
+        filter { includeGroup 'net.createmod.ponder' }
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'AnvilLib'
+                url = 'https://server.cjsah.net:1002/maven/releases/'
+            }
+        }
+        filter { includeGroup 'dev.anvilcraft.lib' }
+    }
 }
+
+dependencies {
+    // 下载固定发布包；NeoForge 在运行时发现其中的 jar-in-jar 依赖。
+    // Download pinned releases; NeoForge discovers their jar-in-jar dependencies at runtime.
+    implementation "maven.modrinth:create:${create_modrinth_version}"
+    implementation "maven.modrinth:anvilcraft:${anvilcraft_modrinth_version}"
+
+    // javac 无法直接读取嵌套 JAR；显式提供编译所需的同版本库。
+    // javac cannot read nested JARs directly; expose matching libraries only for compilation.
+    compileOnly("net.createmod.ponder:ponder-neoforge:${ponder_version}") {
+        transitive = false
+    }
+    compileOnly "dev.anvilcraft.lib:anvillib-neoforge-${minecraft_version}:${anvillib_version}"
+}
+spotless {
+    encoding 'UTF-8'
+    lineEndings = com.diffplug.spotless.LineEnding.UNIX
+    java {
+        target 'src/*/java/**/*.java'
+        googleJavaFormat('1.28.0')
+        removeUnusedImports()
+    }
+}
+
+checkstyle {
+    toolVersion = '12.3.0'
+    // 使用此固定 Checkstyle 版本内置的完整 Google 规则。
+    // Use the complete Google rules shipped with this pinned Checkstyle version.
+    config = resources.text.fromArchiveEntry(
+        configurations.checkstyle.filter { it.name == "checkstyle-${toolVersion}.jar" },
+        'google_checks.xml'
+    )
+    configProperties = ['org.checkstyle.google.severity': 'error']
+    ignoreFailures = false
+    maxWarnings = 0
+}
+
+tasks.withType(Checkstyle).configureEach {
+    // Google 规则仅检查源码，无需编译或解析游戏依赖。
+    // Google rules only inspect source, without compiling or resolving game dependencies.
+    classpath = files()
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+tasks.register('styleCheck') {
+    group = 'verification'
+    description = 'Checks Google Java formatting and coding conventions without compiling the mod.'
+    dependsOn tasks.named('spotlessCheck'), tasks.withType(Checkstyle)
+}
+
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.named('processResources', ProcessResources).configure {
-    inputs.property 'jarVersion', project.version
-    filesMatching('META-INF/neoforge.mods.toml') { expand jarVersion: project.version }
+    def jarVersion = project.version.toString()
+    inputs.property 'jarVersion', jarVersion
+    filesMatching('META-INF/neoforge.mods.toml') { expand jarVersion: jarVersion }
 }

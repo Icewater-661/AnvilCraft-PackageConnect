@@ -33,15 +33,52 @@
 
 ## 从源码构建
 
-需要 Java 21，仓库包含 Gradle Wrapper。
+安装 JDK 21，将 `JAVA_HOME` 指向该 JDK，然后克隆仓库。Gradle Wrapper 会自动下载 Gradle 和固定版本的模组依赖。首次构建需要联网，无需已有 Minecraft 实例、本地 `libs` 目录或依赖准备脚本。
 
-1. 准备当前兼容版本的 Create 和 AnvilCraft JAR。
-2. 在 Windows PowerShell 中执行 `./scripts/prepare-libs.ps1 -ModsDirectory "C:\path\to\instance\mods"`。脚本把两者及其内置依赖准备到 `libs`；切换依赖版本时应从空的 `libs` 开始。
-3. 执行 `./gradlew.bat build`，成品位于 `build/libs/`。
+Linux / macOS：
 
-其他系统可自行准备相同 `libs` 内容，再执行 `./gradlew build`。第三方依赖不随源码仓库分发，也不打包进本附属。
+```sh
+./gradlew build
+./gradlew runClient
+```
 
-`./gradlew.bat runServer` 在独立 `run-server` 目录执行功能检查后关闭。首次运行前需在该目录配置 Minecraft EULA 和服务端配置。当前版本通过 111 项功能断言。
+Windows PowerShell：
+
+```powershell
+.\gradlew.bat build
+.\gradlew.bat runClient
+```
+
+`build` 的成品位于 `build/libs/`。`runClient` 在 `run-client/` 启动开发客户端，加载 Create、AnvilCraft 和本附属。IDE 直接将仓库根目录作为 Gradle 项目导入，并选择 JDK 21。
+
+依赖版本统一固定在 [gradle.properties](gradle.properties)：
+
+| 依赖 | 固定版本 | 发布来源 |
+| --- | --- | --- |
+| Create | 适用于 Minecraft 1.21.1 的 6.0.10 | Modrinth 发布 ID `UjX6dr61` |
+| AnvilCraft | 适用于 Minecraft 1.21.1 的 1.6.0+snapshot.2465 | Modrinth 发布 ID `85SOrOGM` |
+| Ponder | 1.0.82+mc1.21.1 | Create Maven，仅编译时使用 |
+| AnvilLib | 2.0.0+snapshot.546 | AnvilLib Maven，仅编译时使用 |
+
+两个 Modrinth 依赖均为完整发布 JAR，NeoForge 在运行时发现其中内嵌的库。编译时额外声明相同版本的 Ponder 和 AnvilLib，使 Java 编译器能够访问嵌套类，且不额外加载运行时副本。第三方依赖不打包进本附属。更新模组版本时，也应核对它们内嵌库的版本。
+
+## 编码规范与开发检查
+
+Java 遵循 [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html)。项目自有代码的说明性注释和 Javadoc 使用中英文双语，由 AI 辅助翻译。AI 与贡献者约束见 [AGENTS.md](AGENTS.md)，架构及后续改进建议见 [docs/architecture.md](docs/architecture.md)。
+
+```sh
+./gradlew spotlessApply
+./gradlew styleCheck
+./gradlew build
+```
+
+Spotless 8.1.0 使用 `google-java-format` 1.28.0；Checkstyle 12.3.0 使用其内置的完整 Google 规则，违规视为错误，警告容忍数为零。`spotlessApply` 自动修复排版，花括号、命名和缺失文档等问题需按检查报告修复。Checkstyle 的 XML 和 HTML 报告位于 `build/reports/checkstyle/`。
+
+`styleCheck` 只检查源码，不编译模组，也不解析游戏依赖。`check` 和 `build` 都会执行风格检查，检查阶段不会自动改写源码。GitHub Actions 独立检查风格，并在 Linux、Windows、macOS 上构建。
+
+`./gradlew runServer` 保留专用功能自检行为：在 `run-server/` 修改测试世界、执行断言，然后关闭服务器。首次运行前，请自行阅读并接受 Minecraft EULA，配置该专用服务器目录；不要使用真实游玩存档。Windows 将上述命令中的 `./gradlew` 替换为 `.\gradlew.bat`。
+
+此前实现记录过 111 项功能断言通过，覆盖存储连接、多方块、仓储连接器、订单、拆包、容量模拟、物品组件、大数量、库存身份和放置方向。这是历史功能结果，并非性能测试或后续改动的验证结果。应检查本次日志中的 `PACKAGECONNECT SELFTEST PASS` / `FAIL`：当前自检捕获失败后只写日志，不能仅凭 Gradle 成功退出判断通过。
 
 ## AI 辅助代码说明
 

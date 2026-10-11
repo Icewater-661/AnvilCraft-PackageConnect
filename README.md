@@ -57,33 +57,52 @@ This reports cache builds, scanned slots, incremental updates, indexed extractio
 
 ## Building from source
 
-You need Java 21. The Gradle wrapper is included.
+Install JDK 21, set `JAVA_HOME` to that JDK, and clone this repository. The Gradle wrapper downloads Gradle and the pinned mod dependencies automatically. The first build requires network access; no existing Minecraft instance, local `libs` directory, or dependency-preparation script is needed.
 
-1. Obtain the matching Create and AnvilCraft JARs. Dependencies are not redistributed in this repository.
+Linux / macOS:
 
-2. Prepare the compile dependencies from a local Minecraft instance:
-   
-   ```powershell
-   .\scripts\prepare-libs.ps1 -ModsDirectory "C:\path\to\instance\mods"
-   ```
-   
-   The script copies the two mod JARs and recursively extracts their embedded dependencies into `libs`. Start with an empty `libs` directory when changing dependency versions.
+```sh
+./gradlew build
+./gradlew runClient
+```
 
-3. Build:
-   
-   ```powershell
-   .\gradlew.bat build
-   ```
+Windows PowerShell:
 
-The addon JAR is written to `build/libs/`. Dependency JARs are used for compilation and development runs; they are not bundled into the addon.
+```powershell
+.\gradlew.bat build
+.\gradlew.bat runClient
+```
 
-On other operating systems, prepare the same local `libs` contents and run `./gradlew build`.
+`build` writes the addon to `build/libs/`. `runClient` launches a development client in `run-client/` with Create, AnvilCraft, and this addon. An IDE can import the root directory as a Gradle project using JDK 21.
 
-## Development checks
+Versions are pinned in [gradle.properties](gradle.properties):
 
-`./gradlew runServer` starts an isolated development server in `run-server/`, executes functional checks, and shuts down. Configure the Minecraft EULA and server properties in that directory before the first run.
+| Dependency | Pinned version | Publication |
+| --- | --- | --- |
+| Create | 6.0.10 for Minecraft 1.21.1 | Modrinth release `UjX6dr61` |
+| AnvilCraft | 1.6.0+snapshot.2465 for Minecraft 1.21.1 | Modrinth release `85SOrOGM` |
+| Ponder | 1.0.82+mc1.21.1 | Create Maven, compile only |
+| AnvilLib | 2.0.0+snapshot.546 | AnvilLib Maven, compile only |
 
-The current version passed 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This was a functional check, not a performance benchmark. 
+The two Modrinth dependencies are complete release JARs; NeoForge discovers their embedded runtime libraries. Matching Ponder and AnvilLib publications expose nested classes to the Java compiler without introducing separate runtime copies. Dependency JARs are not bundled into the addon. When updating a mod release, also check the versions of its embedded libraries.
+
+## Code style and development checks
+
+Java follows the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html). Project-owned explanatory code comments and Javadoc are bilingual Chinese/English, with AI-assisted translation. Contributor and AI rules are in [AGENTS.md](AGENTS.md); the architecture and further improvement proposals are in [docs/architecture.md](docs/architecture.md).
+
+```sh
+./gradlew spotlessApply
+./gradlew styleCheck
+./gradlew build
+```
+
+Spotless 8.1.0 uses `google-java-format` 1.28.0. Checkstyle 12.3.0 uses its complete bundled Google rules, with violations treated as errors and zero warnings allowed. `spotlessApply` fixes formatting; braces, names, and missing documentation may require manual fixes. XML and HTML Checkstyle reports are written to `build/reports/checkstyle/`.
+
+`styleCheck` checks source without compiling the mod or resolving game dependencies. Both `check` and `build` include the style checks and never auto-format source. GitHub Actions runs a separate style check and builds on Linux, Windows, and macOS.
+
+`./gradlew runServer` retains the dedicated functional self-test setup: it uses `run-server/`, modifies the test world, runs assertions, and shuts down. Read and accept the Minecraft EULA yourself and configure that dedicated server directory before running it. Do not use a real gameplay world. On Windows, use `.\gradlew.bat` for these commands.
+
+The previous implementation recorded 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This is a historical functional result, not a performance benchmark or proof that later changes passed. Inspect the current run's `PACKAGECONNECT SELFTEST PASS` / `FAIL` messages: the existing self-test catches failures and logs them, so a successful Gradle exit alone is insufficient.
 
 ## AI-assisted code
 
