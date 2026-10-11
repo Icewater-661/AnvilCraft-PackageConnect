@@ -8,19 +8,44 @@ group = 'dev.packageconnect'
 version = '0.1.2'
 base { archivesName = "anvilcraft-packageconnect-${minecraft_version}" }
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+// 世界自检单独编译；正式 JAR 和客户端不包含其入口。
+// Compile world checks separately; the release JAR and client exclude their entrypoint.
+sourceSets {
+    integrationTest {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+def selfTestReport = layout.buildDirectory.file('reports/integrationTest/result.txt')
 neoForge {
     version = neoforge_version
-    mods { anvilcraft_packageconnect { sourceSet sourceSets.main } }
+    mods {
+        anvilcraft_packageconnect { sourceSet sourceSets.main }
+        packageconnect_selftest {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.integrationTest
+        }
+    }
+    unitTest {
+        enable()
+        testedMod = mods.anvilcraft_packageconnect
+        loadedMods = [mods.anvilcraft_packageconnect]
+    }
     runs {
         client {
             client()
+            loadedMods = [mods.anvilcraft_packageconnect]
             gameDirectory = file('run-client')
         }
         server {
             server()
+            loadedMods = [mods.packageconnect_selftest]
+            sourceSet = sourceSets.integrationTest
             gameDirectory = file('run-server')
             programArgument '--nogui'
-            jvmArgument '-Dpackageconnect.selftest=true'
+            systemProperty 'packageconnect.selftest.report', selfTestReport.get().asFile.absolutePath
+            systemProperty 'packageconnect.selftest.fail',
+                    providers.gradleProperty('selfTestFailure').getOrElse('false')
         }
     }
 }
@@ -69,7 +94,31 @@ dependencies {
         transitive = false
     }
     compileOnly "dev.anvilcraft.lib:anvillib-neoforge-${minecraft_version}:${anvillib_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
+configurations.testCompileOnly.extendsFrom(configurations.compileOnly)
+tasks.named('test', Test) {
+    useJUnitPlatform()
+}
+
+// 每次启动前删除旧结果；启动失败、断言失败或缺少结果均不能通过任务。
+// Remove stale results before each launch; startup/assertion failures or missing reports fail.
+tasks.named('runServer') {
+    doFirst { delete selfTestReport }
+    doLast {
+        def report = selfTestReport.get().asFile
+        if (!report.isFile() || !(report.getText('UTF-8').trim() ==~ /PASS [1-9][0-9]*/)) {
+            throw new GradleException('PackageConnect integration checks did not pass; inspect run-server/logs/latest.log.')
+        }
+    }
+}
+
+// 即使无法启动专用世界，常规构建仍编译全部集成检查。
+// Compile all integration checks during a normal build, even without a dedicated test world.
+tasks.named('check') { dependsOn tasks.named('integrationTestClasses') }
 spotless {
     encoding 'UTF-8'
     lineEndings = com.diffplug.spotless.LineEnding.UNIX

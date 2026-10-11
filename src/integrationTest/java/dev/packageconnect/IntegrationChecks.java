@@ -1,13 +1,15 @@
 package dev.packageconnect;
 
-import com.mojang.logging.LogUtils;
+import com.simibubi.create.Create;
 import com.simibubi.create.api.packager.InventoryIdentifier;
+import com.simibubi.create.content.logistics.BigItemStack;
 import com.simibubi.create.content.logistics.packager.IdentifiedInventory;
 import com.simibubi.create.content.logistics.packager.PackagerBlock;
 import com.simibubi.create.content.logistics.packager.PackagerBlockEntity;
 import com.simibubi.create.content.logistics.packager.PackagingRequest;
 import com.simibubi.create.content.logistics.packagerLink.PackagerLinkBlock;
 import com.simibubi.create.content.logistics.packagerLink.PackagerLinkBlockEntity;
+import com.simibubi.create.content.logistics.packagerLink.RequestPromise;
 import dev.dubhe.anvilcraft.block.entity.storage.StorageBlockEntity;
 import dev.dubhe.anvilcraft.block.multipart.AbstractMultiPartBlock;
 import dev.dubhe.anvilcraft.saved.storage.CrateStorage;
@@ -20,6 +22,7 @@ import java.util.UUID;
 import net.createmod.catnip.math.BlockFace;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.GlobalPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
@@ -30,27 +33,22 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.context.DirectionalPlaceContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.ChestBlockEntity;
 import net.minecraft.world.level.block.state.properties.AttachFace;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 
-/** 仅在开发服务器显式启用自检属性时执行。 Runs only when the development server enables the selftest property. */
+/** 只在专用开发世界执行真实上游及 Mixin 检查。 Checks real upstream code and Mixins in a dedicated test world. */
 final class IntegrationChecks {
   private static int assertions;
 
-  static void run(MinecraftServer server) {
-    try {
-      storageChecks();
-      for (String name : StorageConnection.BLOCKS) {
-        worldChecks(server, name);
-      }
-      LogUtils.getLogger()
-          .info(
-              "PACKAGECONNECT SELFTEST PASS: {} assertions; {}", assertions, StorageCache.stats());
-    } catch (Throwable error) {
-      LogUtils.getLogger().error("PACKAGECONNECT SELFTEST FAIL", error);
-    } finally {
-      server.halt(false);
+  static int run(MinecraftServer server) {
+    assertions = 0;
+    check(!Boolean.getBoolean("packageconnect.selftest.fail"), "deliberate failure probe");
+    storageChecks();
+    for (String name : StorageConnection.BLOCKS) {
+      worldChecks(server, name);
     }
+    return assertions;
   }
 
   private static void check(boolean condition, String message) {
@@ -74,7 +72,7 @@ final class IntegrationChecks {
     check(StorageCache.get(crate) == cache, "shared cache");
     check(cache.summary() == cache.summary(), "unchanged summary reused");
     check(cache.extract(copper(1), 64, true).getCount() == 64, "simulated extract");
-    check(cache.count(new StorageCache.Key(copper(1))) == 100, "simulation did not mutate");
+    check(cache.count(copper(1)) == 100, "simulation did not mutate");
     check(cache.extract(copper(1), 64, false).getCount() == 64, "real indexed extract");
     check(cache.summary().getCountOf(copper(1)) == 36, "mutation hook updates cache");
     handler.extractUnlimited(0, 36, false);
@@ -84,55 +82,57 @@ final class IntegrationChecks {
     ItemStack named = copper(10);
     named.set(DataComponents.CUSTOM_NAME, Component.literal("different components"));
     handler.insertItem(named, false);
+    check(cache.count(named) == 10 && cache.count(copper(1)) == 0, "component variants isolated");
     check(
-        cache.count(new StorageCache.Key(named)) == 10
-            && cache.count(new StorageCache.Key(copper(1))) == 0,
-        "component variants isolated");
-    check(
-        !StorageUnpacking.fits(cache, List.of(copper(1000), new ItemStack(Items.GOLD_INGOT, 1000))),
+        !StorageUnpacking.fits(crate, List.of(copper(1000), new ItemStack(Items.GOLD_INGOT, 1000))),
         "whole package capacity rather than per-stack capacity");
     handler.setDispose(true);
-    check(StorageUnpacking.fits(cache, List.of(copper(3000))), "native disposal semantics");
+    check(StorageUnpacking.fits(crate, List.of(copper(3000))), "native disposal semantics");
 
     var shulker = new ShulkerContainerStorage(UUID.randomUUID());
     shulker.getItems().setTypeLimit(2);
     var typed = StorageCache.get(shulker);
     check(
         !StorageUnpacking.fits(
-            typed,
+            shulker,
             List.of(
                 copper(10),
                 new ItemStack(Items.GOLD_INGOT, 10),
                 new ItemStack(Items.IRON_INGOT, 10))),
         "combined new-type limit");
     check(
-        !StorageUnpacking.fits(typed, List.of(copper(40000), copper(40000))),
+        !StorageUnpacking.fits(shulker, List.of(copper(40000), copper(40000))),
         "combined per-type limit");
-    check(typed.entries.isEmpty(), "unpack simulation did not mutate");
+    check(typed.occupiedSlots() == 0, "unpack simulation did not mutate");
 
     var infinite = new HyperdimensionStorage(UUID.randomUUID());
     infinite.getItems().insertItem(copper(Integer.MAX_VALUE), false);
     infinite.getItems().insertItem(copper(100), false);
     var huge = StorageCache.get(infinite);
     check(
-        huge.count(new StorageCache.Key(copper(1))) == (long) Integer.MAX_VALUE + 100,
+        huge.count(copper(1)) == (long) Integer.MAX_VALUE + 100,
         "long counts and duplicate physical slots");
     check(huge.summary().getCountOf(copper(1)) == 1_000_000_000, "Create display count saturation");
     huge.extract(copper(1), 64, false);
-    check(
-        huge.count(new StorageCache.Key(copper(1))) == (long) Integer.MAX_VALUE + 36,
-        "large count extraction");
-    long scanned = StorageCache.scannedSlots;
+    check(huge.count(copper(1)) == (long) Integer.MAX_VALUE + 36, "large count extraction");
+    long scanned = StorageCache.statistics().scannedSlots();
     for (int i = 0; i < 100; i++) {
       huge.extract(copper(1), 64, true);
     }
-    check(scanned == StorageCache.scannedSlots, "repeated lookup does not rescan storage");
+    check(
+        scanned == StorageCache.statistics().scannedSlots(),
+        "repeated lookup does not rescan storage");
   }
 
   @SuppressWarnings({"rawtypes", "unchecked"})
   private static void worldChecks(MinecraftServer server, String name) {
     var level = server.overworld();
     BlockPos main = new BlockPos(0, 100, 0);
+    // 清理专用世界的预留测试区域，保证上一次断言失败后仍可重复运行。
+    // Reset the reserved test area so a previous assertion failure cannot contaminate this run.
+    for (BlockPos pos : BlockPos.betweenClosed(main.offset(-4, -1, -4), main.offset(4, 4, 4))) {
+      level.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
+    }
     var block =
         BuiltInRegistries.BLOCK.get(ResourceLocation.fromNamespaceAndPath("anvilcraft", name));
     var state = block.defaultBlockState();
@@ -267,21 +267,19 @@ final class IntegrationChecks {
         StorageCache.get(storage).summary().getCountOf(copper(1)) == 48,
         name + " stock order exact extraction");
     check(
-        StorageCache.get(storage).count(new StorageCache.Key(new ItemStack(Items.IRON_INGOT))) == 0,
+        StorageCache.get(storage).count(new ItemStack(Items.IRON_INGOT)) == 0,
         name + " dynamic multiple-item order");
     pack.animationTicks = 0;
     pack.heldBox = ItemStack.EMPTY;
     pack.attemptToSend(null);
-    check(
-        StorageCache.get(storage).count(new StorageCache.Key(copper(1))) == 0,
-        name + " ordinary packing");
+    check(StorageCache.get(storage).count(copper(1)) == 0, name + " ordinary packing");
     var unpack = new StorageUnpacking();
     List<ItemStack> contents = List.of(copper(15), new ItemStack(Items.IRON_INGOT, 25));
     check(
         unpack.unpack(level, face, level.getBlockState(face), Direction.EAST, contents, null, true),
         name + " unpack dry run");
     check(
-        StorageCache.get(storage).count(new StorageCache.Key(copper(1))) == 0,
+        StorageCache.get(storage).count(copper(1)) == 0,
         name + " unpack simulation leaves inventory unchanged");
     check(
         unpack.unpack(
@@ -290,6 +288,65 @@ final class IntegrationChecks {
     check(
         StorageCache.get(storage).summary().getCountOf(copper(1)) == 15,
         name + " unpack final counts");
+    final var previousBridge = pack.targetInventory.getInventory();
+    Storages.get().remove(storage.getId());
+    var replacement = StorageConnection.storage(storageBlockEntity);
+    replacement.getItems().insertItem(copper(7), false);
+    check(replacement != storage, name + " storage replacement fixture");
+    check(
+        pack.targetInventory.getInventory() != previousBridge,
+        name + " replacement rebinds bridge");
+    check(
+        pack.getAvailableItems().getCountOf(copper(1)) == 7,
+        name + " replacement refreshes summary");
+    BlockPos unloaded = new BlockPos(29_999_984, 100, 29_999_984);
+    check(!level.isLoaded(unloaded), name + " unloaded chunk fixture");
+    check(
+        StorageConnection.resolve(level, unloaded) == null,
+        name + " unloaded lookup does not load chunk");
+    final var sharedStock = StorageCache.get(replacement).summary();
+    BlockPos linkPos = packPos.above();
+    var linkBlock = BuiltInRegistries.BLOCK.get(ResourceLocation.parse("create:stock_link"));
+    level.setBlock(
+        linkPos,
+        linkBlock.defaultBlockState().setValue(PackagerLinkBlock.FACE, AttachFace.FLOOR),
+        2);
+    var link = (PackagerLinkBlockEntity) level.getBlockEntity(linkPos);
+    check(link != null && link.getPackager() == pack, name + " fallback arrival link fixture");
+    GlobalPos linkLocation = GlobalPos.of(level.dimension(), linkPos);
+    Create.LOGISTICS.linkAdded(link.behaviour.freqId, linkLocation, UUID.randomUUID());
+    var promise = new RequestPromise(new BigItemStack(copper(1), 16));
+    Create.LOGISTICS.getQueuedPromises(link.behaviour.freqId).add(promise);
+    check(pack.getAvailableItems() == sharedStock, name + " shared arrival baseline");
+    check(
+        Create.LOGISTICS.hasQueuedPromises(link.behaviour.freqId),
+        name + " pending arrival fixture");
+    BlockPos chestPos = packPos.relative(facing);
+    level.setBlock(chestPos, Blocks.CHEST.defaultBlockState(), 2);
+    var chest = (ChestBlockEntity) level.getBlockEntity(chestPos);
+    chest.setItem(0, copper(12));
+    // 先填充再转向，避免中间的空库存查询掩盖旧共享摘要被上游修改的问题。
+    // Fill before rotating so an intermediate empty query cannot hide mutation of the old summary.
+    level.setBlock(
+        packPos, pack.getBlockState().setValue(PackagerBlock.FACING, facing.getOpposite()), 2);
+    var fallback = pack.targetInventory.getInventory();
+    check(
+        fallback != null && !(fallback instanceof StorageBridge),
+        name + " immediate ordinary-container fallback");
+    check(pack.getAvailableItems().getCountOf(copper(1)) == 12, name + " fallback stock query");
+    check(sharedStock.getCountOf(copper(1)) == 7, name + " fallback preserves shared summary");
+    check(
+        promise.promisedStack.count == 11,
+        name
+            + " fallback reports five arriving items; remaining="
+            + promise.promisedStack.count
+            + ", direction="
+            + PackagerLinkBlock.getConnectedDirection(level.getBlockState(linkPos))
+            + ", pending="
+            + Create.LOGISTICS.hasQueuedPromises(link.behaviour.freqId));
+    Create.LOGISTICS.linkRemoved(link.behaviour.freqId, linkLocation);
+    level.setBlock(linkPos, Blocks.AIR.defaultBlockState(), 2);
+    level.setBlock(chestPos, Blocks.AIR.defaultBlockState(), 2);
     level.setBlock(packPos, Blocks.AIR.defaultBlockState(), 2);
     if (other != null) {
       level.setBlock(other, Blocks.AIR.defaultBlockState(), 2);

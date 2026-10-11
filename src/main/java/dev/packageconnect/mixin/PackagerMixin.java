@@ -12,6 +12,7 @@ import java.util.List;
 import net.neoforged.neoforge.items.IItemHandler;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -28,6 +29,8 @@ public abstract class PackagerMixin {
   @Shadow public InvManipulationBehaviour targetInventory;
 
   @Shadow private InventorySummary availableItems;
+
+  @Unique private boolean packageconnectSharedStock;
 
   /**
    * 通知 Create 库存变化；目标方法可能修改旧摘要。 Notifies Create about stock changes; the target may mutate the old
@@ -46,6 +49,12 @@ public abstract class PackagerMixin {
   @Inject(method = "getAvailableItems", at = @At("HEAD"), cancellable = true)
   private void packageconnectStock(CallbackInfoReturnable<InventorySummary> cir) {
     if (!(targetInventory.getInventory() instanceof StorageBridge bridge)) {
+      // 切回普通容器后，Create 会直接修改旧摘要；只在离开共享库存时复制一次。
+      // On fallback Create mutates the previous summary; detach it once when leaving shared stock.
+      if (packageconnectSharedStock && availableItems != null) {
+        availableItems = availableItems.copy();
+      }
+      packageconnectSharedStock = false;
       return;
     }
     InventorySummary current = bridge.cache().summary();
@@ -56,6 +65,7 @@ public abstract class PackagerMixin {
       submitNewArrivals(availableItems == null ? null : availableItems.copy(), current);
       availableItems = current;
     }
+    packageconnectSharedStock = true;
     cir.setReturnValue(current);
   }
 

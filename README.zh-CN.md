@@ -23,13 +23,13 @@
 
 ## 性能设计
 
-缓存只是实际库存的目录，物品仍保存在铁砧工艺存储中。第一次访问建立索引；正常存取只更新变化槽位，整批替换时重建。库存摘要在变化后按需生成，并由多个打包器复用。
+缓存只是实际库存的目录，物品仍保存在铁砧工艺存储中。第一次访问建立索引；正常存取只更新变化槽位，整批替换时重建。同类型数量变化复用原有的物品组件键和槽位集合；订单提取只复制本次需要的槽位，单个槽位足够时无需复制集合。库存摘要在变化后按需生成，由多个打包器复用；摘要中的物品与私有索引键互相独立。
 
 最多保留 256 份缓存，淘汰后下次访问重新建立，服务器停止时清理。内部数量使用 `long`；Create 显示的单种物品数量按其原生 INF 值限制为 10 亿。
 
 完整库存摘要、到货通知、终端目录传输和铁砧工艺原生插入仍有开销。
 
-管理员可使用 `/packageconnect stats` 查看缓存建立、扫描槽位、增量更新、索引提取与摘要命中次数。这些计数不是耗时测量。
+管理员可使用 `/packageconnect stats` 查看缓存建立、扫描槽位、增量更新、索引提取、实际提取槽位与摘要命中次数的不可变快照。这些计数不是耗时测量。索引复用 Minecraft 自带的 fastutil 原生类型集合，附属不额外打包运行时库。
 
 ## 从源码构建
 
@@ -64,7 +64,7 @@ Windows PowerShell：
 
 ## 编码规范与开发检查
 
-Java 遵循 [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html)。项目自有代码的说明性注释和 Javadoc 使用中英文双语，由 AI 辅助翻译。AI 与贡献者约束见 [AGENTS.md](AGENTS.md)，架构及后续改进建议见 [docs/architecture.md](docs/architecture.md)。
+Java 遵循 [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html)。项目自有代码的说明性注释和 Javadoc 使用中英文双语，由 AI 辅助翻译。AI 与贡献者约束见 [AGENTS.md](AGENTS.md)，职责划分、上游契约及验证边界见 [docs/architecture.md](docs/architecture.md)。
 
 ```sh
 ./gradlew spotlessApply
@@ -74,11 +74,15 @@ Java 遵循 [Google Java Style Guide](https://google.github.io/styleguide/javagu
 
 Spotless 8.1.0 使用 `google-java-format` 1.28.0；Checkstyle 12.3.0 使用其内置的完整 Google 规则，违规视为错误，警告容忍数为零。`spotlessApply` 自动修复排版，花括号、命名和缺失文档等问题需按检查报告修复。Checkstyle 的 XML 和 HTML 报告位于 `build/reports/checkstyle/`。
 
-`styleCheck` 只检查源码，不编译模组，也不解析游戏依赖。`check` 和 `build` 都会执行风格检查，检查阶段不会自动改写源码。GitHub Actions 独立检查风格，并在 Linux、Windows、macOS 上构建。
+`styleCheck` 检查三个 Java source set 的源码，不编译模组，也不解析游戏依赖。`check` 和 `build` 都会执行风格检查、JUnit 回归测试，并编译世界集成检查；检查阶段不会自动改写源码。GitHub Actions 独立检查风格，并在 Linux、Windows、macOS 上构建。
 
-`./gradlew runServer` 保留专用功能自检行为：在 `run-server/` 修改测试世界、执行断言，然后关闭服务器。首次运行前，请自行阅读并接受 Minecraft EULA，配置该专用服务器目录；不要使用真实游玩存档。Windows 将上述命令中的 `./gradlew` 替换为 `.\gradlew.bat`。
+`./gradlew test` 使用真实 AnvilCraft handler 执行 JUnit 测试，不启动服务器或访问世界。覆盖组件差异、模拟不变性、大数量、物理空洞与重复条目、缓存失效与淘汰、实时订单队列、原生空间权重、溢出销毁和永恒物品。固定种子的差分测试还会将容量预判与真实原生插入逐一对照，共 360 组场景。报告位于 `build/reports/tests/test/`。
 
-此前实现记录过 111 项功能断言通过，覆盖存储连接、多方块、仓储连接器、订单、拆包、容量模拟、物品组件、大数量、库存身份和放置方向。这是历史功能结果，并非性能测试或后续改动的验证结果。应检查本次日志中的 `PACKAGECONNECT SELFTEST PASS` / `FAIL`：当前自检捕获失败后只写日志，不能仅凭 Gradle 成功退出判断通过。
+`./gradlew runServer` 在专用 `run-server/` 世界中放置和移除方块、修改库存、执行集成断言，然后关闭服务器。它验证真实 Mixin 回调、连接、多方块、仓储连接器、打包、拆包、全服存储身份、存储替换、未加载区块保护、普通容器回退和放置方向。不要指向真实游玩存档。固定版本的 NeoForge 开发启动器使用上游开发模式的 EULA 处理，本项目不写入接受协议的文件；若所用启动器要求接受，请自行阅读并接受 Minecraft EULA。Windows 使用 `.\gradlew.bat`。
+
+世界检查及其启动监听器位于 `src/integrationTest/`，只由 `runServer` 加载，不进入正式 JAR 或 `runClient`。Gradle 在启动前删除旧结果，要求 `build/reports/integrationTest/result.txt` 包含本次的 `PASS <断言数>`；结果缺失或为 `FAIL` 都会导致任务失败。日志仍保留 `PACKAGECONNECT SELFTEST PASS` / `FAIL`。可在专用世界运行 `./gradlew runServer -PselfTestFailure=true` 验证失败路径（预期失败），随后恢复正常运行。
+
+编译成功或启动准备成功不能替代世界检查。自动检查也不能证明客户端渲染、客户端与服务端安装组合兼容性，或以毫秒计量的性能提升。
 
 ## AI 辅助代码说明
 

@@ -41,7 +41,7 @@ For single-player, install the addon in the local instance, which also runs the 
 
 The cache is an index of the real inventory, not a second inventory. Items remain in AnvilCraft storage.
 
-Caches are shared by storage UUID. Initial access builds the index; normal mutations update only the affected slot. Orders locate matching items and data components through the index instead of scanning the entire storage. Summaries are rebuilt on demand after changes and reused between packagers.
+Caches are shared by storage UUID. Initial access builds the index; normal mutations update only the affected slot. Count-only changes reuse the existing item/component key and slot set. Orders locate matching items through the index and snapshot only the slots needed for the current extraction; a single sufficient slot needs no snapshot. Summaries are rebuilt on demand after changes and reused between packagers. Their item stacks are separate from the private index keys.
 
 Up to 256 storage caches are retained. Evicted caches are rebuilt on the next access, and all caches are cleared when the server stops. Internal aggregate counts use `long`; per-item counts exposed through Create are capped at its native `INF` value of 1,000,000,000.
 
@@ -53,7 +53,7 @@ Administrators can run:
 /packageconnect stats
 ```
 
-This reports cache builds, scanned slots, incremental updates, indexed extractions, and summary cache hits. These counters are not timing measurements.
+This reports an immutable snapshot of cache builds, scanned slots, incremental updates, indexed extractions, native extraction slots, and summary cache hits. These counters are not timing measurements. The index uses fastutil primitive collections already supplied by Minecraft; the addon bundles no additional runtime library.
 
 ## Building from source
 
@@ -88,7 +88,7 @@ The two Modrinth dependencies are complete release JARs; NeoForge discovers thei
 
 ## Code style and development checks
 
-Java follows the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html). Project-owned explanatory code comments and Javadoc are bilingual Chinese/English, with AI-assisted translation. Contributor and AI rules are in [AGENTS.md](AGENTS.md); the architecture and further improvement proposals are in [docs/architecture.md](docs/architecture.md).
+Java follows the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html). Project-owned explanatory code comments and Javadoc are bilingual Chinese/English, with AI-assisted translation. Contributor and AI rules are in [AGENTS.md](AGENTS.md); responsibilities, upstream contracts, and validation boundaries are in [docs/architecture.md](docs/architecture.md).
 
 ```sh
 ./gradlew spotlessApply
@@ -98,11 +98,15 @@ Java follows the [Google Java Style Guide](https://google.github.io/styleguide/j
 
 Spotless 8.1.0 uses `google-java-format` 1.28.0. Checkstyle 12.3.0 uses its complete bundled Google rules, with violations treated as errors and zero warnings allowed. `spotlessApply` fixes formatting; braces, names, and missing documentation may require manual fixes. XML and HTML Checkstyle reports are written to `build/reports/checkstyle/`.
 
-`styleCheck` checks source without compiling the mod or resolving game dependencies. Both `check` and `build` include the style checks and never auto-format source. GitHub Actions runs a separate style check and builds on Linux, Windows, and macOS.
+`styleCheck` checks all three Java source sets without compiling the mod or resolving game dependencies. Both `check` and `build` run style checks, JUnit regression tests, and compilation of world integration checks; they never auto-format source. GitHub Actions runs a separate style check and builds on Linux, Windows, and macOS.
 
-`./gradlew runServer` retains the dedicated functional self-test setup: it uses `run-server/`, modifies the test world, runs assertions, and shuts down. Read and accept the Minecraft EULA yourself and configure that dedicated server directory before running it. Do not use a real gameplay world. On Windows, use `.\gradlew.bat` for these commands.
+`./gradlew test` runs JUnit tests against real AnvilCraft handlers without starting a server or accessing a world. Coverage includes component variants, simulation invariance, long counts, physical holes and duplicate entries, cache invalidation and eviction, live order queues, native space weights, overflow disposal, and eternal items. A fixed-seed differential test compares capacity plans against actual native insertion across 360 scenarios. Reports are in `build/reports/tests/test/`.
 
-The previous implementation recorded 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This is a historical functional result, not a performance benchmark or proof that later changes passed. Inspect the current run's `PACKAGECONNECT SELFTEST PASS` / `FAIL` messages: the existing self-test catches failures and logs them, so a successful Gradle exit alone is insufficient.
+`./gradlew runServer` uses the dedicated `run-server/` world, places and removes blocks, changes inventory, runs integration assertions, and shuts down. This checks real Mixin callbacks, connections, multiblock parts, stock links, packaging, unpacking, global storage identity, storage replacement, unloaded chunks, container fallback, and placement orientation. Never point it at a gameplay world. The pinned NeoForge development launcher uses upstream development-mode EULA handling; this project does not write an EULA acceptance file. Where a launcher requires acceptance, read and accept the Minecraft EULA yourself. On Windows, use `.\gradlew.bat`.
+
+World checks and their startup listener live in `src/integrationTest/` and are loaded only by `runServer`; neither the release JAR nor `runClient` contains them. Before launching, Gradle deletes the previous result. The task requires a fresh `PASS <assertion count>` in `build/reports/integrationTest/result.txt`; missing results and `FAIL` make the task fail. Logs still contain `PACKAGECONNECT SELFTEST PASS` / `FAIL`. To verify the failure path in the dedicated world, run `./gradlew runServer -PselfTestFailure=true` (expected to fail), then run normally again.
+
+Successful compilation or run preparation does not replace these world checks. Automated checks also do not establish client rendering, mixed client/server installation compatibility, or performance improvements in milliseconds.
 
 ## AI-assisted code
 

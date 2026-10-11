@@ -14,6 +14,7 @@ import java.util.UUID;
 import net.createmod.catnip.math.BlockFace;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
@@ -69,6 +70,9 @@ public final class StorageConnection extends InvManipulationBehaviour {
    * settings.
    */
   public static BaseStorage<?> storage(StorageBlockEntity be) {
+    if (!(be.getLevel() instanceof ServerLevel level) || !level.getServer().isSameThread()) {
+      throw new IllegalStateException("Storage access requires the server thread");
+    }
     if (be.getId() == null) {
       be.setId(UUID.randomUUID());
     }
@@ -81,7 +85,7 @@ public final class StorageConnection extends InvManipulationBehaviour {
   @Override
   public void findNewCapability() {
     StorageBlockEntity be = resolve(getWorld(), getTarget().getOpposite().getPos());
-    if (be != null) {
+    if (be != null && filter.test(be)) {
       targetCapability = new StorageBridge(storage(be));
     } else {
       super.findNewCapability();
@@ -95,13 +99,15 @@ public final class StorageConnection extends InvManipulationBehaviour {
     // multipart replacement.
     if (targetCapability instanceof StorageBridge bridge) {
       StorageBlockEntity be = resolve(getWorld(), getTarget().getOpposite().getPos());
-      if (be == null) {
-        targetCapability = null;
-        return null;
-      }
-      BaseStorage<?> current = storage(be);
-      if (current != bridge.storage) {
-        targetCapability = new StorageBridge(current);
+      if (be == null || !filter.test(be)) {
+        // 目标已变为普通容器时立即走上游查询，并保留未加载区块保护。
+        // Immediately use upstream lookup after replacement, retaining its unloaded-chunk guard.
+        super.findNewCapability();
+      } else {
+        BaseStorage<?> current = storage(be);
+        if (!bridge.isBoundTo(current)) {
+          targetCapability = new StorageBridge(current);
+        }
       }
     }
     return super.getInventory();

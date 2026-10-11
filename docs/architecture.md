@@ -1,102 +1,157 @@
-# 架构与改进建议
+# 架构 / Architecture
 
-## 当前结构
+## 职责与源码集 / Responsibilities and source sets
 
-项目是单 Gradle 模块，包含 9 个 Java 源文件。它通过 Create 的扩展注册点、物品接口和
-三个 Mixin 将 AnvilCraft 的原生存储接入打包与仓储系统，没有注册新方块或自定义网络协议。
+项目保留单 Gradle 模块，通过 Create 注册点、物品接口和三个 Mixin 接入 AnvilCraft。
+没有增加新方块、网络协议、依赖注入框架或第二份库存。
 
-| 文件 | 职责与边界 |
+The project remains a single Gradle module, integrating through Create registries, item handlers,
+and three Mixins. It adds no blocks, network protocol, dependency injection framework, or inventory copy.
+
+| 位置 / Location | 职责 / Responsibility |
 | --- | --- |
-| `PackageConnect` | 注册库存身份与拆包处理器、缓存生命周期、统计命令和开发自检入口。 |
-| `StorageConnection` | 解析四种支持的存储及其多方块主部件，管理物品接口绑定，以 UUID 判断库存身份。 |
-| `StorageBridge` | 将 AnvilCraft handler 适配为 `IItemHandler`；为普通打包与订单打包提供索引视图。 |
-| `StorageCache` | 按 UUID 共享缓存，维护槽位与物品组件索引、聚合数量、空间占用及 Create 库存摘要。 |
-| `StorageUnpacking` | 先模拟整包容量，再通过原生 handler 插入；支持类型限制、空间限制和溢出销毁。 |
-| `PackagerMixin` | 替换库存连接行为，接入共享摘要、订单提取与同库存识别。 |
-| `PackagerBlockMixin` | 对支持的存储补充放置朝向，保留 Create 的容器方向优先级。 |
-| `StorageMixin` | 在 AnvilCraft 内容变化后通知共享缓存。 |
-| `IntegrationChecks` | 专用开发服务器中的存储和世界集成断言。当前仍位于主源码集中。 |
+| `src/main/.../PackageConnect` | 注册、统计命令与服务器停止清理。 Registration, statistics command, and server-stop cleanup. |
+| `StorageConnection` | 已加载方块及多方块解析、服务端存储访问、连接重绑定和全服身份。 Loaded block/multipart resolution, server storage access, rebinding, and global identity. |
+| `StorageBridge` | 原生物品接口适配；普通打包类型快照与实时订单队首视图。 Native item adaptation, a type snapshot for ordinary packing, and a live order-head view. |
+| `ItemKey` | 私有物品及组件快照、稳定哈希和原生空间权重。 Private item/component snapshot, stable hash, and native space weight. |
+| `StorageCache` | 按 UUID 共享的物理槽位索引、类型聚合、库存摘要和不可变统计快照。 UUID-shared physical slot index, aggregate counts, stock summaries, and immutable statistics. |
+| `StorageUnpacking` | 整包容量预判与原生提交，按三类 handler 分离规则。 Whole-package planning and native commit, with rules separated by handler family. |
+| `mixin` | 内容回调、库存连接、摘要、提取、同库存判断及放置方向的上游注入。 Upstream hooks for mutations, connections, summaries, extraction, identity, and placement. |
+| `src/test/` | 不启动世界的真实 handler 回归与差分测试。 Real-handler regression and differential tests without a world. |
+| `src/integrationTest/` | 专用开发世界检查、启动监听及结果写入。 Dedicated development-world checks, startup listener, and result writer. |
 
 ```mermaid
 flowchart TD
-    Packager[Create 打包器] --> Mixins[PackagerMixin / PackagerBlockMixin]
+    Packager[Create packager] --> Mixins[PackagerMixin / PackagerBlockMixin]
     Mixins --> Connection[StorageConnection]
     Connection --> Bridge[StorageBridge]
     Mixins --> Cache[StorageCache]
     Bridge --> Cache
-    Bridge --> Storage[AnvilCraft 原生存储]
+    Bridge --> Storage[AnvilCraft native handler]
+    Cache --> Keys[ItemKey]
     Cache --> Storage
     Unpack[StorageUnpacking] --> Cache
     Unpack --> Storage
-    Storage --> Hook[StorageMixin 内容变化回调]
+    Storage --> Hook[StorageMixin]
     Hook --> Cache
 ```
 
-## 主要数据流程
+## 连接与身份 / Connections and identity
 
-1. 初始化时为四种存储注册 Create 的 `InventoryIdentifier` 和 `UnpackingHandler`。
-2. 打包器查找相邻存储：解析多方块主部件，取得 UUID 对应的 SavedData 存储，建立适配接口。
-   普通容器继续走 Create 原有路径；客户端放置预览只进行方块解析。
-3. 首次读取库存时建立缓存。缓存键包含物品及数据组件，数量使用 `long`；向 Create 暴露摘要时
-   按其 `BigItemStack.INF` 饱和。UUID 全服共享，库存身份比较不包含维度。
-4. 原生存储发生变化后，Mixin 回调只刷新受影响槽位；无效或批量索引标记整个缓存待重建。
-   handler 实例变化时替换缓存，最多保留 256 个存储，服务器停止时清理。
-5. 普通打包遍历物品类型；订单打包读取当前请求，通过索引定位匹配槽位。原生提取触发的回调
-   同步更新缓存，因此提取前需要复制匹配槽位集合。
-6. 拆包在服务器线程先检查整包累计容量；通过后调用原生插入。此流程依赖单线程及预判与上游
-   handler 语义一致，并没有通用回滚事务，修改时必须特别验证这些前提。
+`resolveBlock` 只读取已加载方块，可供客户端放置预测使用；多方块先解析主部件，再检查主部件
+区块是否已加载。`storage` 要求处于服务器线程，才允许分配 UUID、更新销毁设置和访问 SavedData。
+库存身份只比较全服 UUID，维度仅用于查询方块面。连接在访问时重新确认存储实例；替换为普通容器
+时立即委托 Create 查询，保留其过滤器、朝向和未加载区块保护。
 
-## 本次选择
+`resolveBlock` reads only loaded blocks and is safe for client placement prediction. Multipart lookup
+also checks that the main part is loaded. `storage` requires the server thread before assigning UUIDs,
+refreshing disposal settings, or accessing SavedData. Inventory identity compares server-wide UUIDs;
+the level only resolves queried faces. Access revalidates the storage instance. Replacement by an ordinary
+container immediately delegates to Create, preserving filters, orientation, and unloaded-chunk guards.
 
-保留现有单模块及职责划分。对当前规模再增加服务接口层、依赖注入框架或拆分多个 Gradle
-模块，收益不足以抵消维护成本。
+## 索引与提取 / Indexing and extraction
 
-编码约束分为两层：`AGENTS.md` 记录语义边界和工作流程；构建使用固定版本的 Spotless /
-`google-java-format` 与 Checkstyle 内置完整 Google 规则检查 Java。`styleCheck` 对源文件工作，
-不需要游戏编译依赖；`check` 和 `build` 同样执行风格检查。项目自有说明性注释使用中英文双语。
-GitHub Actions 独立执行 `styleCheck`，并配置 Linux、Windows、macOS 构建。
-风格工具不验证库存正确性、Mixin 注入成功或运行时兼容性。
+缓存注册表是访问顺序的有界映射，最多保留 256 个存储；同 UUID 的 handler 变化时替换缓存，
+服务器停止时释放所有引用和统计。索引字段不向容量算法、适配器或测试暴露可变集合。
 
-构建依赖改为 Gradle 自动下载，移除 Windows 专用脚本和本地 `libs` 要求。Create 6.0.10 与
-AnvilCraft `1.6.0+snapshot.2465` 分别使用固定 Modrinth 发布 ID `UjX6dr61`、`85SOrOGM`。
-版本集中记录在 `gradle.properties`，仓库按依赖组限制范围，避免本地 Maven 内容影响构建。
+The access-ordered registry retains at most 256 storages. A handler change replaces that UUID's cache;
+server shutdown releases references and resets statistics. Mutable index collections are private.
 
-运行时使用完整发布 JAR，由 NeoForge 发现它们原有的 jar-in-jar 依赖；编译时通过
-`compileOnly` 引入匹配的 Ponder `1.0.82+mc1.21.1` 和 AnvilLib `2.0.0+snapshot.546`，
-让 javac 能访问嵌套库中的类型。第三方库不再由本附属解压或打包，也不额外添加运行时副本。
+物理槽位使用 fastutil 的 `Int2ObjectOpenHashMap`，每种物品的槽位集合使用 `IntAVLTreeSet`。
+这些库由 Minecraft 提供，不额外下载或嵌入运行时副本。同类型数量变化只更新差值，复用键及槽位
+集合，并保持普通打包的类型顺序。类型改变或槽位清空才修改集合；批量回调标记下一次读取时重建。
 
-仓库使用 ModDev 的项目级依赖仓库。该插件本身会注册项目仓库，Gradle 默认会因此忽略
-`settings.gradle` 中的依赖仓库；依赖来源应在 `build.gradle` 的同一层声明。
-新增 `runClient` 提供跨平台开发入口，`runServer` 保留原有功能自检用途。
+Physical slots use fastutil's `Int2ObjectOpenHashMap`; each item type uses an `IntAVLTreeSet` of slots.
+Minecraft already supplies these libraries. Count-only changes update deltas while reusing keys and slot
+sets, preserving type order for ordinary packing. Type changes and emptied slots update the collections;
+bulk callbacks defer rebuilding until the next read.
 
-## 建议的后续改进
+原生提取会同步修改索引，因此不能边遍历原集合边提取。单槽足够时直接提取；跨槽时只复制满足
+本次数量所需的槽位，不再复制全部匹配槽位。模拟直接返回独立物品副本，不调用真实提取。
 
-### 优先处理：隔离开发自检并可靠报告失败
+Native extraction synchronously mutates the index, so extraction cannot iterate the live set. A sufficient
+single slot is used directly; multi-slot extraction snapshots only enough slots for this request instead
+of every matching slot. Simulation returns a separate stack without performing native extraction.
 
-`IntegrationChecks` 目前和正式实现一起打包；`PackageConnect` 在系统属性打开时调度它。
-自检会修改世界并关闭服务器。其 `run` 方法捕获 `Throwable` 后只写失败日志，然后关闭服务器，
-因此 `runServer` 的成功退出不能证明断言通过。
+聚合数量使用 `long`，Create 摘要中的每种数量封顶为 `BigItemStack.INF`。`ItemKey` 不暴露持有的
+可变物品；类型列表和摘要获得物品副本。摘要本身仍是 Create 的可变对象，调用方必须按共享只读
+约定使用；`submitNewArrivals` 会扣减旧摘要，Mixin 在调用前复制旧摘要。切回普通容器时也先
+分离旧共享摘要，避免 Create 原生分支继续修改其他打包器正在使用的数据。
 
-建议单独建立开发用 source set / 测试模组，将启动监听也移入该入口；再提供独立验证任务，
-通过测试框架报告或明确的结果文件使断言失败成为任务失败。生产 JAR 应不包含自检入口。
-这需要核对 NeoForge 开发运行配置，不能只移动一个 Java 文件。
+Aggregates use `long`; per-type Create counts saturate at `BigItemStack.INF`. `ItemKey` never exposes
+its mutable stack: type lists and summaries receive copies. The shared summary remains a mutable Create
+object and must be treated as read-only. The Mixin copies the old summary before `submitNewArrivals`,
+which subtracts from that argument. Switching back to an ordinary container also detaches the old shared
+summary before Create's native branch can mutate data still used by other packagers.
 
-验收时既检查成功路径，也故意使一个断言失败，确认任务返回失败；检查正式 JAR 不含自检类，
-并在专用测试世界重新覆盖现有场景。此项属于行为和构建架构调整，本轮作为建议保留。
+## 拆包契约 / Unpacking contract
 
-### 随需求演进：收紧缓存内部状态的访问
+`StorageUnpacking` 只通过数量、占用槽位和空间查询使用缓存，独立读取原生容量设置。
+预判严格保留包内顺序：
 
-`StorageUnpacking` 直接读取缓存的 handler 和空间占用，自检直接读取索引和统计计数。
-这些包内访问让当前实现很紧凑，但也使容量算法与索引表示耦合。
+`StorageUnpacking` queries only counts, occupied slots, and used space from the cache, and reads native
+capacity settings separately. Planning preserves package order:
 
-若继续扩展存储类型，建议先提供只读的容量信息、查询接口和统计快照，再按需要拆出容量策略。
-迁移时需验证重复物理槽位的类型计数、数据组件隔离、累计空间权重和溢出销毁行为。
-当前没有必要仅为分层而增加一套通用存储框架。
+- 无限存储只检查物品有效性，无需为了容量建立库存索引。
+  Infinite storage checks item validity without building an index just to plan capacity.
+- 类型受限存储累计每种组件键的新增量；类型数使用占用的物理条目数，包括迁移的重复条目。
+  Type-limited storage accumulates additions per component key and counts occupied physical entries,
+  including migrated duplicates, against the type limit.
+- 空间受限存储调用上游 `computeSpace(stack, 1)`，累计真正保留的数量。销毁模式可丢弃普通
+  溢出物品，永恒物品仍必须完整容纳。
+  Space-limited storage uses upstream `computeSpace(stack, 1)` and charges only retained items.
+  Disposal may discard ordinary overflow; eternal items must still fit completely.
 
-## 验证边界
+全包通过预判后才通过原生 handler 提交，每次传入物品副本。流程依赖服务器单线程与固定上游
+语义，不提供通用回滚。如果上游返回非空余量，立即抛出错误，不能把部分插入当作成功。
 
-`styleCheck` 只证明自动风格规则通过；`build` 自动解析固定依赖并编译、打包。
-`prepareClientRun` 与 `prepareServerRun` 可以验证运行文件和依赖准备，但不会启动游戏，
-因此也不能证明 Mixin 注入和运行时行为正确。
-现有功能自检只能在专用开发世界运行，并应以当次日志的 PASS / FAIL 为准。
-README 记载的 111 项断言是历史结果，不代表任意后续修改都已通过游戏验证。
+Commit uses the native handler with stack copies only after the entire package fits. This relies on the
+server thread and the pinned upstream semantics, not general rollback. A nonempty remainder throws an
+error rather than treating a partial insertion as success.
+
+## 构建与验证 / Build and validation
+
+依赖集中固定在 `gradle.properties`。Create、AnvilCraft 使用完整 Modrinth 发布 JAR；NeoForge
+发现其 jar-in-jar 库，编译时通过匹配版本的 Ponder、AnvilLib `compileOnly` 声明暴露嵌套类型。
+仓库按依赖组限制范围，不依赖本地 `libs`、`mavenLocal()` 或提取脚本。JUnit 仅用于测试。
+
+Dependencies are pinned in `gradle.properties`. Complete Modrinth releases provide Create and AnvilCraft;
+NeoForge discovers their jar-in-jar libraries. Matching compile-only Ponder and AnvilLib dependencies
+expose nested types to javac. Repositories are group-scoped, with no local `libs`, `mavenLocal()`, or
+extraction script. JUnit is test-only.
+
+三个源码集保持同一模块。ModDev 的正式模组模型只包含 `main`，服务器检查模型合并 `main` 与
+`integrationTest`；每个运行配置显式选择一个模型，避免重复加载或跨模组拆分相同 Java 包。
+客户端和正式 JAR 不包含开发检查入口。`PackageConnect` 不知道自检类或自检开关。
+
+Three source sets remain in one module. ModDev's release model contains only `main`; the server-check
+model combines `main` and `integrationTest`. Each run explicitly selects one model to avoid duplicate
+loading or splitting a Java package across mods. The client and release JAR exclude the development
+entrypoint. `PackageConnect` has no reference to check classes or switches.
+
+| 命令 / Command | 保证与边界 / Evidence and limits |
+| --- | --- |
+| `spotlessApply` | 显式格式化；检查任务不会执行它。 Explicit formatting; verification never invokes it. |
+| `styleCheck` | 三个源码集的 Spotless 和完整 Google Checkstyle；无需编译游戏。 Spotless and complete Google Checkstyle across all source sets, without game compilation. |
+| `test` | 真实 handler 的 JUnit 回归，包括 360 组固定种子差分场景；测试回调替代 SavedData 通知，不代表 Mixin 验证。 Real-handler JUnit regression with 360 fixed-seed differential scenarios; fixture callbacks replace SavedData notification and do not prove Mixin behavior. |
+| `build` | 风格、JUnit、正式打包及世界检查编译，不启动服务器。 Style, JUnit, release packaging, and world-check compilation; no server launch. |
+| `prepareClientRun` / `prepareServerRun` | 运行文件准备，不代表游戏检查通过。 Run-file preparation, not game validation. |
+| `runServer` | 专用世界真实集成检查；要求当次成功报告，随后关闭服务器。 Real integration checks in a dedicated world; requires a fresh success report and shuts down. |
+
+`runServer` 启动前删除旧的 `build/reports/integrationTest/result.txt`。开发入口写入 `PASS <断言数>`
+或 `FAIL`，Gradle 验证结果；缺失报告也失败。`-PselfTestFailure=true` 在首个断言触发故意失败，
+用于验证失败传播，正常验证时不传此属性。报告与世界文件均不提交。
+
+Before launch, `runServer` removes the old `build/reports/integrationTest/result.txt`. The development
+entrypoint writes `PASS <assertion count>` or `FAIL`; Gradle checks it and also fails on a missing report.
+`-PselfTestFailure=true` deliberately fails the first assertion to verify failure propagation. Omit that
+property for normal verification. Reports and worlds are not committed.
+
+专用自检会改动世界并关闭服务器，不能连接实际服务器或复用游玩存档。固定版本的上游开发
+启动器在开发模式跳过 EULA 文件检查；项目不写入接受协议的文件，也不向生产启动器增加绕过
+选项。客户端渲染、仅服务端安装的联机组合和真实耗时基准需要单独验证，不能由计数器推断。
+
+World checks mutate the world and stop the server; never use a real server or gameplay save. The pinned
+upstream development launcher skips the EULA file check in development mode. This project neither writes
+acceptance files nor adds bypass options for production launchers. Client rendering, server-only addon
+installation in multiplayer, and elapsed-time performance benchmarks need separate validation.

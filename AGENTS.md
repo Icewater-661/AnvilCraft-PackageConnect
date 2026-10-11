@@ -8,8 +8,10 @@
 - 本项目是 Minecraft 1.21.1 / NeoForge 的小型兼容附属，使用 Java 21、Gradle Wrapper。
 - 功能是将 AnvilCraft 存储接入 Create 打包与仓储系统。保留轻量单模块结构；新增抽象应有具体需求。
 - `PackageConnect` 负责生命周期与注册；`StorageConnection` 负责存储解析和身份；
-  `StorageBridge` 负责物品接口适配；`StorageCache` 负责共享索引；
+  `StorageBridge` 负责物品接口适配；`StorageCache` 负责共享索引，`ItemKey` 封装组件键；
   `StorageUnpacking` 负责容量预判及提交；`mixin` 包只负责上游注入与委托。
+- `main` 仅放生产实现，`test` 放无世界的真实 handler 回归，`integrationTest` 放专用世界检查。
+  世界检查入口只由 `runServer` 加载，不得重新放回正式模组或客户端。
 - 修改上游方法调用或注入点时，核对当前实际依赖版本的签名及语义，不能靠方法名猜测。
 - 不顺带升级 Minecraft、NeoForge、Create、AnvilCraft、Java 或发布版本。
 
@@ -62,16 +64,20 @@ Gradle JVM 和 Java 工具链均建议使用 JDK 21。
 ./gradlew runClient
 ```
 
-- `check` / `build` 已包含风格检查。提交前至少运行 `styleCheck`；不把 `spotlessApply`
-  接到 `check`，检查阶段不应自动修改源码。
+- `check` / `build` 已包含风格检查、JUnit 回归及世界检查编译。提交前至少运行 `styleCheck`；
+  不把 `spotlessApply` 接到 `check`，检查阶段不应自动修改源码。
 - `styleCheck` 执行 Spotless 与全部 Java source set 的 Checkstyle，不解析游戏依赖。
   `build` 自动下载固定依赖并编译、打包；`runClient` 启动独立开发客户端。
 - GitHub Actions 分别验证风格与 Linux、Windows、macOS 构建，不代表游戏集成验证通过。
-- 涉及联动行为时，在依赖齐备的专用 `run-server` 测试环境运行 `./gradlew runServer`，
-  并检查本次日志的 `PACKAGECONNECT SELFTEST PASS` / `FAIL`；当前自检失败只写日志，
-  不能单凭 Gradle 退出码或 README 中历史断言数认定通过。
+- `./gradlew test` 使用真实 handler 验证索引及容量，不启动世界；测试回调替代 SavedData 通知，
+  不把这些测试当作 Mixin 或世界集成已通过。
+- 涉及联动行为时，在依赖齐备的专用 `run-server` 测试环境运行 `./gradlew runServer`。
+  检查当次日志的 `PACKAGECONNECT SELFTEST PASS` / `FAIL` 和
+  `build/reports/integrationTest/result.txt`；启动前清除旧报告，报告缺失或失败必须让任务失败。
+  修改自检入口或结果验证时，以 `-PselfTestFailure=true` 验证断言失败确实返回失败，随后正常重跑。
 - 开发自检会放置/移除方块、修改库存并关闭服务器，只能使用专用测试世界。
-  不连接用户实际服务器，不自动接受 Minecraft EULA。
+  不连接用户实际服务器，不写入 Minecraft EULA 接受文件。固定版本的上游开发启动器自行处理
+  开发模式 EULA；不得为生产启动器添加绕过选项。
 - 依赖不足或无法运行检查时，准确说明缺少什么、执行过什么、哪些结论尚未验证。
 - 测试覆盖实际行为及边界：模拟不变性、数据组件、容量累计、大数量、缓存失效、
   多方块、跨维度身份与上游回退。纯格式调整不添加重复实现的测试。

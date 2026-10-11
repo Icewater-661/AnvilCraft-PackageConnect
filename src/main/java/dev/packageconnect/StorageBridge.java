@@ -9,7 +9,7 @@ import net.neoforged.neoforge.items.IItemHandler;
 
 /** 将原生存储适配到 Create，并提供索引打包视图。 Adapts native storage for Create with indexed packaging views. */
 public final class StorageBridge implements IItemHandler {
-  final BaseStorage<?> storage;
+  private final BaseStorage<?> storage;
 
   /** 创建适配器，不复制或持有独立库存。 Creates an adapter without copying or owning the underlying inventory. */
   public StorageBridge(BaseStorage<?> storage) {
@@ -26,9 +26,15 @@ public final class StorageBridge implements IItemHandler {
     return storage.getId();
   }
 
+  boolean isBoundTo(BaseStorage<?> current) {
+    return storage == current;
+  }
+
   @Override
   public int getSlots() {
-    return storage.getItems().size() + 1;
+    // 物理空洞后仍可能有物品，另加一个虚拟插入槽，不能使用上游的类型数量代替槽位数。
+    // Items may follow physical holes; add one insertion slot instead of using upstream type count.
+    return (int) Math.min((long) storage.getItems().size() + 1, Integer.MAX_VALUE);
   }
 
   @Override
@@ -65,48 +71,54 @@ public final class StorageBridge implements IItemHandler {
    * @return 读取和提取原始库存的视图；a view that reads and extracts from the original storage
    */
   public IItemHandler packingView(List<PackagingRequest> requests) {
-    StorageCache cache = cache();
-    List<ItemStack> keys = requests == null ? cache.keys() : List.of();
-    return new IItemHandler() {
-      private ItemStack item(int slot) {
-        if (requests != null) {
-          return requests.isEmpty() ? ItemStack.EMPTY : requests.getFirst().item();
-        }
-        return slot < 0 || slot >= keys.size() ? ItemStack.EMPTY : keys.get(slot);
-      }
+    return new PackingView(requests);
+  }
 
-      @Override
-      public int getSlots() {
-        return requests == null ? keys.size() : requests.isEmpty() ? 0 : 1;
-      }
+  private final class PackingView implements IItemHandler {
+    private final List<PackagingRequest> requests;
+    private final List<ItemStack> itemTypes;
 
-      @Override
-      public ItemStack getStackInSlot(int slot) {
-        return extractItem(slot, 64, true);
-      }
+    private PackingView(List<PackagingRequest> requests) {
+      this.requests = requests;
+      itemTypes = requests == null ? cache().itemTypes() : List.of();
+    }
 
-      @Override
-      public ItemStack extractItem(int slot, int amount, boolean simulate) {
-        ItemStack key = item(slot);
-        return key.isEmpty()
-            ? ItemStack.EMPTY
-            : StorageCache.get(storage).extract(key, amount, simulate);
+    private ItemStack item(int slot) {
+      if (slot < 0 || slot >= getSlots()) {
+        return ItemStack.EMPTY;
       }
+      return requests == null ? itemTypes.get(slot) : requests.getFirst().item();
+    }
 
-      @Override
-      public ItemStack insertItem(int slot, ItemStack stack, boolean simulate) {
-        return stack;
-      }
+    @Override
+    public int getSlots() {
+      return requests == null ? itemTypes.size() : requests.isEmpty() ? 0 : 1;
+    }
 
-      @Override
-      public int getSlotLimit(int slot) {
-        return 64;
-      }
+    @Override
+    public ItemStack getStackInSlot(int slot) {
+      return extractItem(slot, getSlotLimit(slot), true);
+    }
 
-      @Override
-      public boolean isItemValid(int slot, ItemStack stack) {
-        return false;
-      }
-    };
+    @Override
+    public ItemStack extractItem(int slot, int amount, boolean simulate) {
+      ItemStack key = item(slot);
+      return key.isEmpty() ? ItemStack.EMPTY : cache().extract(key, amount, simulate);
+    }
+
+    @Override
+    public ItemStack insertItem(int slot, ItemStack stack, boolean simulate) {
+      return stack;
+    }
+
+    @Override
+    public int getSlotLimit(int slot) {
+      return 64;
+    }
+
+    @Override
+    public boolean isItemValid(int slot, ItemStack stack) {
+      return false;
+    }
   }
 }
