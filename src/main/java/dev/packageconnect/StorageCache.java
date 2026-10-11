@@ -4,122 +4,257 @@ import com.simibubi.create.content.logistics.BigItemStack;
 import com.simibubi.create.content.logistics.packager.InventorySummary;
 import dev.dubhe.anvilcraft.api.itemhandler.unlimited.UnlimitedItemStacksResourceHandler;
 import dev.dubhe.anvilcraft.saved.storage.BaseStorage;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.ints.IntAVLTreeSet;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntSortedSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import net.minecraft.world.item.ItemStack;
 
-import java.util.*;
-
-/** Server-thread-only, shared by storage UUID; no persisted duplicate inventory. */
+/**
+ * 仅限服务器线程，按 UUID 共享原始库存的索引。 Server-thread-only index of the native inventory, shared by UUID.
+ *
+ * <p>所有写入仍通过原生 handler，其同步内容回调维护索引。 All writes use the native handler; its synchronous content
+ * callbacks maintain this index.
+ */
 public final class StorageCache {
-    private static final Map<UUID, StorageCache> CACHES = new LinkedHashMap<>(16, .75f, true);
-    public static long builds, scannedSlots, updates, indexedExtractions, stockHits;
-    final UnlimitedItemStacksResourceHandler handler;
-    private final Map<Integer, Slot> slots = new HashMap<>();
-    final Map<Key, Entry> entries = new LinkedHashMap<>();
-    private InventorySummary summary;
-    private boolean dirty = true;
-    long space;
+  private static final int MAX_CACHES = 256;
+  private static final Map<UUID, StorageCache> caches = new LinkedHashMap<>(16, .75f, true);
+  private static long builds;
+  private static long scannedSlots;
+  private static long updates;
+  private static long indexedExtractions;
+  private static long extractionSlots;
+  private static long stockHits;
 
-    private StorageCache(UnlimitedItemStacksResourceHandler handler) { this.handler = handler; }
+  private final UnlimitedItemStacksResourceHandler handler;
+  private final Int2ObjectMap<Slot> slots = new Int2ObjectOpenHashMap<>();
+  private final Map<ItemKey, Entry> entries = new LinkedHashMap<>();
+  private InventorySummary summary;
+  private boolean dirty = true;
+  private long usedSpace;
 
-    public static StorageCache get(BaseStorage<?> storage) {
-        StorageCache cache = CACHES.get(storage.getId());
-        if (cache == null || cache.handler != storage.getItems()) {
-            cache = new StorageCache(storage.getItems());
-            CACHES.put(storage.getId(), cache);
-        }
-        // Bound retained handler references; an evicted connected storage rebuilds on next access.
-        while (CACHES.size() > 256) CACHES.remove(CACHES.keySet().iterator().next());
-        cache.ensure();
-        return cache;
+  private StorageCache(UnlimitedItemStacksResourceHandler handler) {
+    this.handler = handler;
+  }
+
+  static StorageCache get(BaseStorage<?> storage) {
+    StorageCache cache = caches.get(storage.getId());
+    if (cache == null || cache.handler != storage.getItems()) {
+      cache = new StorageCache(storage.getItems());
+      caches.put(storage.getId(), cache);
     }
-
-    public static void changed(BaseStorage<?> storage, int index) {
-        StorageCache cache = CACHES.get(storage.getId());
-        if (cache == null || cache.handler != storage.getItems()) return;
-        if (index < 0 || index >= cache.handler.size()) cache.dirty = true;
-        else if (!cache.dirty) cache.refresh(index);
+    // 限制保留的 handler 引用数量；被淘汰存储在下次访问时重建。
+    // Bound retained handler references; evicted storage rebuilds on its next access.
+    if (caches.size() > MAX_CACHES) {
+      caches.remove(caches.keySet().iterator().next());
     }
+    cache.ensure();
+    return cache;
+  }
 
-    public static void clear() {
-        CACHES.clear();
-        builds = scannedSlots = updates = indexedExtractions = stockHits = 0;
+  /**
+   * 在服务器线程刷新变化槽位，批量替换则延迟重建。 Refreshes a changed slot on the server thread; bulk replacement defers
+   * a full rebuild until the next read.
+   */
+  public static void changed(BaseStorage<?> storage, int index) {
+    StorageCache cache = caches.get(storage.getId());
+    if (cache == null || cache.handler != storage.getItems()) {
+      return;
     }
-
-    public static String stats() {
-        return "caches=" + CACHES.size() + ", builds=" + builds + ", scannedSlots=" + scannedSlots
-            + ", slotUpdates=" + updates + ", indexedExtractions=" + indexedExtractions + ", stockCacheHits=" + stockHits;
+    if (index < 0 || index >= cache.handler.size()) {
+      cache.dirty = true;
+    } else if (!cache.dirty) {
+      cache.refresh(index);
     }
+  }
 
-    void ensure() {
-        if (!dirty) return;
-        slots.clear(); entries.clear(); space = 0;
-        dirty = false;
-        builds++;
-        for (int i = 0; i < handler.size(); i++) { scannedSlots++; refresh(i); }
+  /** 服务器停止时释放缓存并重置统计。 Releases cached handlers and resets statistics when the server stops. */
+  public static void clear() {
+    caches.clear();
+    builds = 0;
+    scannedSlots = 0;
+    updates = 0;
+    indexedExtractions = 0;
+    extractionSlots = 0;
+    stockHits = 0;
+  }
+
+  /** 返回不可变的操作计数快照，仅限服务器线程。 Returns an immutable operation-count snapshot on the server thread. */
+  public static Statistics statistics() {
+    return new Statistics(
+        caches.size(),
+        builds,
+        scannedSlots,
+        updates,
+        indexedExtractions,
+        extractionSlots,
+        stockHits);
+  }
+
+  /** 返回诊断计数，不代表耗时。 Returns diagnostic operation counts, which do not measure elapsed time. */
+  public static String stats() {
+    return statistics().toString();
+  }
+
+  private void ensure() {
+    if (!dirty) {
+      return;
+    }
+    slots.clear();
+    entries.clear();
+    usedSpace = 0;
+    summary = null;
+    builds++;
+    for (int index = 0; index < handler.size(); index++) {
+      scannedSlots++;
+      refresh(index);
+    }
+    dirty = false;
+  }
+
+  private void refresh(int index) {
+    Slot old = slots.get(index);
+    ItemStack current = handler.getStackInSlot(index);
+    long count = current.isEmpty() ? 0 : handler.getAmountAsLong(index);
+    updates++;
+    if (old != null && count > 0 && old.key.matches(current)) {
+      // 常见的数量变化复用键和槽位集合，避免复制组件及重排类型。
+      // Reuse the key and slot set for count-only changes, avoiding component copies and
+      // reordering.
+      long delta = count - old.count;
+      if (delta != 0) {
+        entries.get(old.key).count += delta;
+        usedSpace += delta * old.key.spacePerItem();
+        slots.put(index, new Slot(old.key, count));
         summary = null;
+      }
+      return;
     }
-
-    private void refresh(int index) {
-        Slot old = slots.remove(index);
-        if (old != null) {
-            Entry entry = entries.get(old.key);
-            entry.count -= old.count;
-            entry.slots.remove(index);
-            if (entry.count == 0) entries.remove(old.key);
-            space -= old.count * weight(old.key.stack);
-        }
-        ItemStack current = handler.getStackInSlot(index);
-        long count = handler.getAmountAsLong(index);
-        if (!current.isEmpty() && count > 0) {
-            Key key = new Key(current);
-            Entry entry = entries.computeIfAbsent(key, k -> new Entry());
-            entry.count += count;
-            entry.slots.add(index);
-            slots.put(index, new Slot(key, count));
-            space += count * weight(current);
-        }
-        summary = null;
-        updates++;
+    if (old != null) {
+      Entry entry = entries.get(old.key);
+      entry.count -= old.count;
+      entry.slots.remove(index);
+      if (entry.slots.isEmpty()) {
+        entries.remove(old.key);
+      }
+      slots.remove(index);
+      usedSpace -= old.count * old.key.spacePerItem();
     }
-
-    public InventorySummary summary() {
-        ensure();
-        if (summary != null) { stockHits++; return summary; }
-        InventorySummary result = new InventorySummary();
-        // Create treats >=INF as unbounded. Each per-type add is <=INF, so its total cannot overflow.
-        entries.forEach((key, entry) -> result.add(key.stack, (int) Math.min(BigItemStack.INF, entry.count)));
-        summary = result;
-        return summary;
+    if (count > 0) {
+      ItemKey key = new ItemKey(current);
+      Entry entry = entries.computeIfAbsent(key, ignored -> new Entry());
+      entry.count += count;
+      entry.slots.add(index);
+      slots.put(index, new Slot(key, count));
+      usedSpace += count * key.spacePerItem();
     }
-
-    long count(Key key) { ensure(); Entry e = entries.get(key); return e == null ? 0 : e.count; }
-    int occupiedSlots() { ensure(); return slots.size(); }
-
-    ItemStack extract(ItemStack requested, int amount, boolean simulate) {
-        ensure(); indexedExtractions++;
-        Entry entry = entries.get(new Key(requested));
-        if (entry == null || amount <= 0) return ItemStack.EMPTY;
-        int count = (int) Math.min(entry.count, Math.min(amount, requested.getMaxStackSize()));
-        if (simulate) return requested.copyWithCount(count);
-        int remaining = count;
-        // Snapshot only matching slots: native mutation callbacks update this entry during extraction.
-        for (int slot : new ArrayList<>(entry.slots)) {
-            remaining -= handler.extractItem(slot, remaining, false).getCount();
-            if (remaining == 0) break;
-        }
-        return requested.copyWithCount(count - remaining);
+    if (old != null || count > 0) {
+      summary = null;
     }
+  }
 
-    List<ItemStack> keys() { ensure(); return entries.keySet().stream().map(k -> k.stack).toList(); }
-    static int weight(ItemStack stack) { return (64 + stack.getMaxStackSize() - 1) / stack.getMaxStackSize(); }
-
-    static final class Key {
-        final ItemStack stack;
-        private final int hash;
-        Key(ItemStack stack) { this.stack = stack.copyWithCount(1); hash = ItemStack.hashItemAndComponents(this.stack); }
-        @Override public int hashCode() { return hash; }
-        @Override public boolean equals(Object o) { return o instanceof Key k && ItemStack.isSameItemSameComponents(stack, k.stack); }
+  /**
+   * 返回共享摘要，调用方不得修改；摘要内物品不与索引键共享。 Returns a shared summary that callers must not mutate; its items
+   * are independent of index keys.
+   */
+  public InventorySummary summary() {
+    ensure();
+    if (summary != null) {
+      stockHits++;
+      return summary;
     }
-    static final class Entry { long count; final Set<Integer> slots = new TreeSet<>(); }
-    private record Slot(Key key, long count) {}
+    InventorySummary result = new InventorySummary();
+    // Create 将达到 INF 的计数视为无限；单次加入不超过 INF，避免其总数溢出。
+    // Create treats counts reaching INF as infinite; cap each addition to avoid total overflow.
+    entries.forEach(
+        (key, entry) -> result.add(key.copyStack(), (int) Math.min(BigItemStack.INF, entry.count)));
+    summary = result;
+    return summary;
+  }
+
+  long count(ItemStack stack) {
+    return stack.isEmpty() ? 0 : count(new ItemKey(stack));
+  }
+
+  long count(ItemKey key) {
+    ensure();
+    Entry entry = entries.get(key);
+    return entry == null ? 0 : entry.count;
+  }
+
+  int occupiedSlots() {
+    ensure();
+    return slots.size();
+  }
+
+  long usedSpace() {
+    ensure();
+    return usedSpace;
+  }
+
+  ItemStack extract(ItemStack requested, int amount, boolean simulate) {
+    if (requested.isEmpty() || amount <= 0) {
+      return ItemStack.EMPTY;
+    }
+    ensure();
+    indexedExtractions++;
+    Entry entry = entries.get(new ItemKey(requested));
+    if (entry == null) {
+      return ItemStack.EMPTY;
+    }
+    int count = (int) Math.min(entry.count, Math.min(amount, requested.getMaxStackSize()));
+    if (simulate) {
+      return requested.copyWithCount(count);
+    }
+    int firstSlot = entry.slots.firstInt();
+    if (slots.get(firstSlot).count >= count) {
+      extractionSlots++;
+      return handler.extractItem(firstSlot, count, false);
+    }
+    // 回调会修改槽位集合；仅复制满足本次提取所需的槽位，工作量由提取量限定。
+    // Callbacks mutate the slot set; snapshot only enough slots for this bounded extraction.
+    IntArrayList selected = new IntArrayList();
+    int needed = count;
+    for (var iterator = entry.slots.iterator(); iterator.hasNext() && needed > 0; ) {
+      int slot = iterator.nextInt();
+      selected.add(slot);
+      needed -= (int) Math.min(needed, slots.get(slot).count);
+    }
+    int remaining = count;
+    for (int index = 0; index < selected.size() && remaining > 0; index++) {
+      extractionSlots++;
+      remaining -= handler.extractItem(selected.getInt(index), remaining, false).getCount();
+    }
+    return requested.copyWithCount(count - remaining);
+  }
+
+  List<ItemStack> itemTypes() {
+    ensure();
+    return entries.keySet().stream().map(ItemKey::copyStack).toList();
+  }
+
+  /**
+   * 自上次清理起的诊断计数；提取槽位数只统计真实提取。 Diagnostic counts since the last clear; extraction slots count only
+   * native, non-simulated extraction calls.
+   */
+  public record Statistics(
+      int caches,
+      long builds,
+      long scannedSlots,
+      long slotUpdates,
+      long indexedExtractions,
+      long extractionSlots,
+      long stockCacheHits) {}
+
+  private static final class Entry {
+    private long count;
+    private final IntSortedSet slots = new IntAVLTreeSet();
+  }
+
+  private record Slot(ItemKey key, long count) {}
 }

@@ -1,2 +1,7 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# 自动识别文本，确保不同平台检出后均使用 LF。
+# Detect text files and enforce LF on checkout across platforms.
+* text=auto eol=lf
+
+# Windows 启动脚本使用原生换行符。
+# Use native line endings for Windows launch scripts.
+*.bat text eol=crlf

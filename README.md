@@ -41,7 +41,7 @@ For single-player, install the addon in the local instance, which also runs the 
 
 The cache is an index of the real inventory, not a second inventory. Items remain in AnvilCraft storage.
 
-Caches are shared by storage UUID. Initial access builds the index; normal mutations update only the affected slot. Orders locate matching items and data components through the index instead of scanning the entire storage. Summaries are rebuilt on demand after changes and reused between packagers.
+Caches are shared by storage UUID. Initial access builds the index; normal mutations update only the affected slot. Count-only changes reuse the existing item/component key and slot set. Orders locate matching items through the index and snapshot only the slots needed for the current extraction; a single sufficient slot needs no snapshot. Summaries are rebuilt on demand after changes and reused between packagers. Their item stacks are separate from the private index keys.
 
 Up to 256 storage caches are retained. Evicted caches are rebuilt on the next access, and all caches are cleared when the server stops. Internal aggregate counts use `long`; per-item counts exposed through Create are capped at its native `INF` value of 1,000,000,000.
 
@@ -53,37 +53,60 @@ Administrators can run:
 /packageconnect stats
 ```
 
-This reports cache builds, scanned slots, incremental updates, indexed extractions, and summary cache hits. These counters are not timing measurements.
+This reports an immutable snapshot of cache builds, scanned slots, incremental updates, indexed extractions, native extraction slots, and summary cache hits. These counters are not timing measurements. The index uses fastutil primitive collections already supplied by Minecraft; the addon bundles no additional runtime library.
 
 ## Building from source
 
-You need Java 21. The Gradle wrapper is included.
+Install JDK 21, set `JAVA_HOME` to that JDK, and clone this repository. The Gradle wrapper downloads Gradle and the pinned mod dependencies automatically. The first build requires network access; no existing Minecraft instance, local `libs` directory, or dependency-preparation script is needed.
 
-1. Obtain the matching Create and AnvilCraft JARs. Dependencies are not redistributed in this repository.
+Linux / macOS:
 
-2. Prepare the compile dependencies from a local Minecraft instance:
-   
-   ```powershell
-   .\scripts\prepare-libs.ps1 -ModsDirectory "C:\path\to\instance\mods"
-   ```
-   
-   The script copies the two mod JARs and recursively extracts their embedded dependencies into `libs`. Start with an empty `libs` directory when changing dependency versions.
+```sh
+./gradlew build
+./gradlew runClient
+```
 
-3. Build:
-   
-   ```powershell
-   .\gradlew.bat build
-   ```
+Windows PowerShell:
 
-The addon JAR is written to `build/libs/`. Dependency JARs are used for compilation and development runs; they are not bundled into the addon.
+```powershell
+.\gradlew.bat build
+.\gradlew.bat runClient
+```
 
-On other operating systems, prepare the same local `libs` contents and run `./gradlew build`.
+`build` writes the addon to `build/libs/`. `runClient` launches a development client in `run-client/` with Create, AnvilCraft, and this addon. An IDE can import the root directory as a Gradle project using JDK 21.
 
-## Development checks
+Versions are pinned in [gradle.properties](gradle.properties):
 
-`./gradlew runServer` starts an isolated development server in `run-server/`, executes functional checks, and shuts down. Configure the Minecraft EULA and server properties in that directory before the first run.
+| Dependency | Pinned version | Publication |
+| --- | --- | --- |
+| Create | 6.0.10 for Minecraft 1.21.1 | Modrinth release `UjX6dr61` |
+| AnvilCraft | 1.6.0+snapshot.2465 for Minecraft 1.21.1 | Modrinth release `85SOrOGM` |
+| Ponder | 1.0.82+mc1.21.1 | Create Maven, compile only |
+| AnvilLib | 2.0.0+snapshot.546 | AnvilLib Maven, compile only |
 
-The current version passed 111 assertions covering storage connections, multiblock parts, stock-link reads, orders, unpacking, capacity simulation, item components, large counts, storage identity, and placement orientation. This was a functional check, not a performance benchmark. 
+The two Modrinth dependencies are complete release JARs; NeoForge discovers their embedded runtime libraries. Matching Ponder and AnvilLib publications expose nested classes to the Java compiler without introducing separate runtime copies. Dependency JARs are not bundled into the addon. When updating a mod release, also check the versions of its embedded libraries.
+
+## Code style and development checks
+
+Java follows the [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html). Project-owned explanatory code comments and Javadoc are bilingual Chinese/English, with AI-assisted translation. Contributor and AI rules are in [AGENTS.md](AGENTS.md); responsibilities, upstream contracts, and validation boundaries are in [docs/architecture.md](docs/architecture.md).
+
+```sh
+./gradlew spotlessApply
+./gradlew styleCheck
+./gradlew build
+```
+
+Spotless 8.1.0 uses `google-java-format` 1.28.0. Checkstyle 12.3.0 uses its complete bundled Google rules, with violations treated as errors and zero warnings allowed. `spotlessApply` fixes formatting; braces, names, and missing documentation may require manual fixes. XML and HTML Checkstyle reports are written to `build/reports/checkstyle/`.
+
+`styleCheck` checks all three Java source sets without compiling the mod or resolving game dependencies. Both `check` and `build` run style checks, JUnit regression tests, and compilation of world integration checks; they never auto-format source. GitHub Actions runs a separate style check and builds on Linux, Windows, and macOS.
+
+`./gradlew test` runs JUnit tests against real AnvilCraft handlers without starting a server or accessing a world. Coverage includes component variants, simulation invariance, long counts, physical holes and duplicate entries, cache invalidation and eviction, live order queues, native space weights, overflow disposal, and eternal items. A fixed-seed differential test compares capacity plans against actual native insertion across 360 scenarios. Reports are in `build/reports/tests/test/`.
+
+`./gradlew runServer` uses the dedicated `run-server/` world, places and removes blocks, changes inventory, runs integration assertions, and shuts down. This checks real Mixin callbacks, connections, multiblock parts, stock links, packaging, unpacking, global storage identity, storage replacement, unloaded chunks, container fallback, and placement orientation. Never point it at a gameplay world. The pinned NeoForge development launcher uses upstream development-mode EULA handling; this project does not write an EULA acceptance file. Where a launcher requires acceptance, read and accept the Minecraft EULA yourself. On Windows, use `.\gradlew.bat`.
+
+World checks and their startup listener live in `src/integrationTest/` and are loaded only by `runServer`; neither the release JAR nor `runClient` contains them. Before launching, Gradle deletes the previous result. The task requires a fresh `PASS <assertion count>` in `build/reports/integrationTest/result.txt`; missing results and `FAIL` make the task fail. Logs still contain `PACKAGECONNECT SELFTEST PASS` / `FAIL`. To verify the failure path in the dedicated world, run `./gradlew runServer -PselfTestFailure=true` (expected to fail), then run normally again.
+
+Successful compilation or run preparation does not replace these world checks. Automated checks also do not establish client rendering, mixed client/server installation compatibility, or performance improvements in milliseconds.
 
 ## AI-assisted code
 
